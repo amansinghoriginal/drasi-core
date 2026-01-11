@@ -13,5 +13,11 @@ Cargo.lock
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# macOS
 .DS_Store
+
+# Agent settings
+.claude/
+.gemini/
+.agents/
 .plans
