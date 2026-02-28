@@ -58,7 +58,7 @@ graph TD
 ### Crate Breakdown
 
 #### Core Engine
-*   **`core`**: The engine's heart. Contains orchestration logic (`QueryBuilder`, `ContinuousQuery`), the evaluation pipeline, path solver, and abstract storage `interface` traits.
+*   **`core`**: The engine's heart. Contains orchestration logic (`QueryBuilder`, `ContinuousQuery`), the evaluation pipeline, path solver, abstract storage `interface` traits, and session transaction control (`SessionControl`, `SessionGuard`).
 *   **`query-ast`**: Defines the language-agnostic Abstract Syntax Tree (AST), the common contract between parsers and the engine.
 *   **`query-cypher` / `query-gql`**: Language frontends. They parse query strings into the `query-ast` structure.
 *   **`functions-cypher` / `functions-gql`**: Standard libraries of language-specific functions (e.g., `toUpper`, `coalesce`) that register with the core engine.
@@ -96,6 +96,7 @@ graph TD
 ### Key Architectural Principles
 *   **Interface-Driven**: The `core` crate defines abstract `trait`s (`ElementIndex`, `ResultIndex`) to decouple logic from storage.
 *   **Pluggable Backends**: Storage implementations are swappable at runtime via dependency injection.
+*   **Session-Scoped Atomicity**: All index writes during a single source-change are wrapped in a `SessionGuard` (begin/commit/rollback). Persistent backends (RocksDB, Garnet) implement `SessionControl` to provide real transactions; in-memory uses `NoOpSessionControl`.
 *   **Plugin Architecture**: The `lib` crate has zero awareness of plugins - they implement traits (`Source`, `Reaction`, `BootstrapProvider`) and are passed at runtime.
 *   **Pipeline Processing**: Data flows linearly: `Source` -> `Middleware` -> `Path Solver` -> `Evaluator` -> `Reaction`.
 *   **Declarative Config**: Queries and middleware pipelines are defined declaratively.
@@ -110,8 +111,8 @@ graph TD
     3.  Add validation tests in `shared-tests/src/use_cases`.
 
 *   **Add a Storage Backend**:
-    1.  Create a new crate in `components/indexes/` implementing `ElementIndex`, `ElementArchiveIndex`, `ResultIndex`, and `FutureQueue`.
-    2.  Implement `IndexBackendPlugin` trait — single `create_index_set(query_id)` method returning an `IndexSet` with all four indexes backed by a shared resource (e.g., one DB instance or connection).
+    1.  Create a new crate in `components/indexes/` implementing `ElementIndex`, `ElementArchiveIndex`, `ResultIndex`, `FutureQueue`, and `SessionControl`.
+    2.  Implement `IndexBackendPlugin` trait — single `create_index_set(query_id)` method returning an `IndexSet` with all indexes and a `SessionControl` backed by a shared resource (e.g., one DB instance or connection).
     3.  Add `shared-tests` as a `dev-dependency` and run the standard suite.
 
 *   **Add Middleware**:

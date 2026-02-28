@@ -9,8 +9,8 @@ The **abstract heart** of the engine. Defines the core logic and interfaces, str
 *   **Statelessness**: Logic components (`evaluation`, `path_solver`) must be stateless; state persistence is delegated to storage backends.
 
 ## Core Responsibilities
-1.  **Interfaces (`interface`)**: Defines the contracts for `ElementIndex`, `ResultIndex`, `FutureQueue`, and the `IndexBackendPlugin`/`IndexSet` abstraction for pluggable storage backends.
+1.  **Interfaces (`interface`)**: Defines the contracts for `ElementIndex`, `ResultIndex`, `FutureQueue`, `SessionControl`/`SessionGuard`, and the `IndexBackendPlugin`/`IndexSet` abstraction for pluggable storage backends.
 2.  **Models (`models`)**: Defines canonical data structures (`Element`, `SourceChange`).
 3.  **Computation (`path_solver`, `evaluation`)**: Implements the graph traversal and expression evaluation logic.
-4.  **Orchestration (`query`)**: Provides `QueryBuilder` and the `ContinuousQuery` runtime loop.
+4.  **Orchestration (`query`)**: Provides `QueryBuilder` and the `ContinuousQuery` runtime loop. Both `process_source_change()` and `process_due_futures()` wrap all index writes in a `SessionGuard` for atomic commit/rollback.
 5.  **Reference Impl (`in_memory_index`)**: Provides the default, ephemeral storage backend.
