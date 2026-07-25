@@ -42,6 +42,7 @@ use crate::future_queue::{self, RocksDbFutureQueue};
 use crate::live_results::{self, RocksDbLiveResultsWriter};
 use crate::outbox::{self, RocksDbOutboxWriter};
 use crate::result_index::{self, RocksDbResultIndex};
+use crate::idle_flush::IdleFlushRegistry;
 use crate::tuning::RocksDbTuning;
 use crate::{RocksDbSessionControl, RocksDbSessionState};
 
@@ -139,6 +140,8 @@ pub struct RocksDbIndexProvider {
     enable_archive: bool,
     direct_io: bool,
     tuning: RocksDbTuning,
+    idle_flush: Arc<IdleFlushRegistry>,
+    sweeper_started: std::sync::atomic::AtomicBool,
 }
 
 impl RocksDbIndexProvider {
@@ -175,7 +178,9 @@ impl RocksDbIndexProvider {
             path: path.into(),
             enable_archive,
             direct_io,
+            idle_flush: Arc::new(IdleFlushRegistry::new(tuning.write_buffer_manager.clone())),
             tuning,
+            sweeper_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -213,6 +218,17 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
 
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+
+        // Register with the idle-flush sweeper (see idle_flush.rs for why),
+        // starting the background task on first use so a tokio runtime is
+        // guaranteed to exist (create_indexes is async).
+        self.idle_flush.register(query_id, &db, &session_state);
+        if !self
+            .sweeper_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            tokio::spawn(self.idle_flush.clone().run());
+        }
 
         let element_index = Arc::new(RocksDbElementIndex::new(
             db.clone(),
