@@ -77,6 +77,11 @@ impl RocksDbSessionState {
         }
     }
 
+    /// True while a session transaction is open (any nesting depth).
+    pub(crate) fn is_session_active(&self) -> bool {
+        self.inner.lock().map(|g| g.depth > 0).unwrap_or(true)
+    }
+
     /// Begin a new session-scoped transaction, or nest into an existing one.
     ///
     /// - If no transaction is active (depth == 0), creates a real

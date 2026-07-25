@@ -38,6 +38,7 @@ pub mod element_index;
 pub mod future_queue;
 pub mod live_results;
 pub mod outbox;
+mod idle_flush;
 mod plugin;
 pub mod result_index;
 mod session_state;
