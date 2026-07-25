@@ -88,9 +88,18 @@ impl StorageBackendSpec {
     pub fn validate(&self) -> Result<(), String> {
         match self {
             StorageBackendSpec::Memory { .. } => Ok(()),
-            StorageBackendSpec::Plugin { kind, .. } => {
+            StorageBackendSpec::Plugin { kind, config } => {
                 if kind.trim().is_empty() {
                     return Err("Storage backend 'kind' must not be empty".to_string());
+                }
+                // Nothing consumes the plugin config payload today: the backend
+                // is whatever provider was injected under this name, constructed
+                // with its own settings. Warn so fields like `enableArchive: false`
+                // in the payload are not silently believed to take effect.
+                if !payload_is_empty(config) {
+                    log::warn!(
+                        "Storage backend config for kind '{kind}' contains settings that are                          not applied: the injected index provider is constructed with its own                          options and this payload is ignored"
+                    );
                 }
                 Ok(())
             }
@@ -108,9 +117,35 @@ impl StorageBackendSpec {
     }
 }
 
+/// True when a plugin spec payload carries no settings (JSON null or empty object).
+fn payload_is_empty(config: &serde_json::Value) -> bool {
+    match config {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_is_empty_detects_settings() {
+        assert!(payload_is_empty(&serde_json::Value::Null));
+        assert!(payload_is_empty(&serde_json::json!({})));
+        assert!(!payload_is_empty(&serde_json::json!({"enableArchive": false})));
+    }
+
+    #[test]
+    fn plugin_spec_with_payload_still_validates() {
+        let spec = StorageBackendSpec::Plugin {
+            kind: "rocksdb".to_string(),
+            config: serde_json::json!({"enableArchive": false}),
+        };
+        // Non-empty payloads warn but do not fail validation.
+        assert!(spec.validate().is_ok());
+    }
 
     #[test]
     fn test_json_roundtrip_both_variants() {
