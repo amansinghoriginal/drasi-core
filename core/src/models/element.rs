@@ -167,6 +167,32 @@ impl Element {
         }
     }
 
+    /// Rough heap-size estimate of this element in bytes, for memory
+    /// accounting (see [`ElementPropertyMap::estimated_byte_size`]).
+    pub fn estimated_byte_size(&self) -> usize {
+        let metadata = self.get_metadata();
+        let meta = 64
+            + metadata.reference.source_id.len()
+            + metadata.reference.element_id.len()
+            + metadata
+                .labels
+                .iter()
+                .map(|l| 16 + l.len())
+                .sum::<usize>();
+        let rel = match self {
+            Element::Node { .. } => 0,
+            Element::Relation {
+                in_node, out_node, ..
+            } => {
+                32 + in_node.source_id.len()
+                    + in_node.element_id.len()
+                    + out_node.source_id.len()
+                    + out_node.element_id.len()
+            }
+        };
+        meta + rel + self.get_properties().estimated_byte_size()
+    }
+
     pub fn merge_missing_properties(&mut self, other: &Element) {
         match (self, other) {
             (

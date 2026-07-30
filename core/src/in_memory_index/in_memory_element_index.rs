@@ -52,6 +52,26 @@ pub struct InMemoryElementIndex {
     // [(join_label, field_value)] => [QueryJoinKey] => ElementReference[]
     partial_joins:
         Arc<RwLock<HashMap<(String, u64), HashMap<QueryJoinKey, HashSet<ElementReference>>>>>,
+
+    /// Incrementally maintained estimate of the heap bytes held by the
+    /// `elements` map (see `Element::estimated_byte_size`). Kept as an atomic
+    /// so `memory_stats` never needs the write lock.
+    estimated_element_bytes: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Point-in-time memory statistics of an [`InMemoryElementIndex`].
+#[derive(Debug, Clone)]
+pub struct InMemoryIndexMemoryStats {
+    /// Number of elements currently indexed.
+    pub elements: usize,
+    /// Entries in the inbound adjacency map.
+    pub adjacency_in: usize,
+    /// Entries in the outbound adjacency map.
+    pub adjacency_out: usize,
+    /// Entries in the element archive (0 unless archiving is enabled).
+    pub archive_entries: usize,
+    /// Incrementally maintained heap-byte estimate of the element map.
+    pub estimated_element_bytes: u64,
 }
 
 impl Default for InMemoryElementIndex {
@@ -72,11 +92,53 @@ impl InMemoryElementIndex {
             join_spec_by_label: Arc::new(RwLock::new(HashMap::new())),
             partial_joins: Arc::new(RwLock::new(HashMap::new())),
             archive_enabled: false,
+            estimated_element_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
     pub fn enable_archive(&mut self) {
         self.archive_enabled = true;
+    }
+
+    /// Point-in-time memory statistics for this index.
+    pub async fn memory_stats(&self) -> InMemoryIndexMemoryStats {
+        InMemoryIndexMemoryStats {
+            elements: self.elements.read().await.len(),
+            adjacency_in: self.element_by_slot_in.read().await.len(),
+            adjacency_out: self.element_by_slot_out.read().await.len(),
+            archive_entries: self.element_archive.read().await.len(),
+            estimated_element_bytes: self
+                .estimated_element_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Spawn a background task that logs this index's memory statistics every
+    /// 30 seconds, labelled with `label` (e.g. the owning query id). The task
+    /// holds only a weak reference and exits when the index is dropped; when
+    /// called outside a tokio runtime it does nothing.
+    pub fn spawn_memory_stats_logger(index: &Arc<Self>, label: String) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let weak = Arc::downgrade(index);
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(index) = weak.upgrade() else { return };
+                let stats = index.memory_stats().await;
+                log::info!(
+                    "in-memory index {label}: {} elements (~{} MiB est), adjacency in/out {}/{}, archive {} entries",
+                    stats.elements,
+                    stats.estimated_element_bytes / (1024 * 1024),
+                    stats.adjacency_in,
+                    stats.adjacency_out,
+                    stats.archive_entries,
+                );
+            }
+        });
     }
 
     async fn clear_slot_affinity(&self, element: &Element) -> Result<(), IndexError> {
@@ -499,6 +561,14 @@ impl ElementIndex for InMemoryElementIndex {
 
         drop(guard);
 
+        use std::sync::atomic::Ordering;
+        self.estimated_element_bytes
+            .fetch_add(new_element.estimated_byte_size() as u64, Ordering::Relaxed);
+        if let Some(prev) = &old_element {
+            self.estimated_element_bytes
+                .fetch_sub(prev.estimated_byte_size() as u64, Ordering::Relaxed);
+        }
+
         if let Some(prev) = &old_element {
             self.clear_slot_affinity(prev).await?;
         }
@@ -525,6 +595,10 @@ impl ElementIndex for InMemoryElementIndex {
 
         drop(guard);
         if let Some(old_element) = old_element {
+            self.estimated_element_bytes.fetch_sub(
+                old_element.estimated_byte_size() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             self.clear_slot_affinity(&old_element).await?;
             self.delete_source_joins(old_element).await?;
         }
@@ -535,6 +609,8 @@ impl ElementIndex for InMemoryElementIndex {
     async fn clear(&self) -> Result<(), IndexError> {
         let mut guard = self.elements.write().await;
         guard.clear();
+        self.estimated_element_bytes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let mut guard = self.slot_affinity.write().await;
         guard.clear();
@@ -1118,5 +1194,55 @@ mod tests {
             let partial_joins = guard.get(&(query_join.id.clone(), existing_hash)).unwrap();
             assert!(partial_joins.get(join_key).unwrap().contains(&existing_ref));
         }
+    }
+}
+
+#[cfg(test)]
+mod memory_stats_tests {
+    use super::*;
+    use crate::interface::ElementIndex as _;
+    use serde_json::json;
+
+    fn node(id: &str, color: &str) -> Element {
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("s", id),
+                labels: Arc::new([Arc::from("Thing")]),
+                effective_from: 0,
+            },
+            properties: ElementPropertyMap::from(json!({ "color": color })),
+        }
+    }
+
+    #[tokio::test]
+    async fn estimated_bytes_track_set_overwrite_and_delete() {
+        let index = InMemoryElementIndex::new();
+        assert_eq!(index.memory_stats().await.estimated_element_bytes, 0);
+
+        index.set_element(&node("a", "blue"), &vec![0]).await.unwrap();
+        let after_insert = index.memory_stats().await;
+        assert_eq!(after_insert.elements, 1);
+        let expected = node("a", "blue").estimated_byte_size() as u64;
+        assert_eq!(after_insert.estimated_element_bytes, expected);
+
+        // Overwrite with a different-sized value: estimate follows the new element.
+        index
+            .set_element(&node("a", "a-much-longer-color-name"), &vec![0])
+            .await
+            .unwrap();
+        let after_overwrite = index.memory_stats().await;
+        assert_eq!(after_overwrite.elements, 1);
+        assert_eq!(
+            after_overwrite.estimated_element_bytes,
+            node("a", "a-much-longer-color-name").estimated_byte_size() as u64
+        );
+
+        index
+            .delete_element(&ElementReference::new("s", "a"))
+            .await
+            .unwrap();
+        let after_delete = index.memory_stats().await;
+        assert_eq!(after_delete.elements, 0);
+        assert_eq!(after_delete.estimated_element_bytes, 0);
     }
 }

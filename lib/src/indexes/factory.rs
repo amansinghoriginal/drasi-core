@@ -196,7 +196,7 @@ impl IndexFactory {
                 if let Some(provider) = self.providers.get(name) {
                     self.build_from_plugin(provider, query_id).await
                 } else if let Some(enable_archive) = self.memory_backends.get(name) {
-                    self.build_memory_indexes(*enable_archive)
+                    self.build_memory_indexes(*enable_archive, query_id)
                 } else if let Some(kind) = self.plugin_backends.get(name) {
                     Err(IndexError::InitializationFailed(format!(
                         "Storage backend '{name}' (kind '{kind}') is declared but no index provider \
@@ -208,7 +208,7 @@ impl IndexFactory {
                 }
             }
             StorageBackendRef::Inline(StorageBackendSpec::Memory { enable_archive }) => {
-                self.build_memory_indexes(*enable_archive)
+                self.build_memory_indexes(*enable_archive, query_id)
             }
             StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind, .. }) => {
                 Err(IndexError::InitializationFailed(format!(
@@ -221,12 +221,20 @@ impl IndexFactory {
     }
 
     /// Build in-memory indexes (returns checkpoint_store: None — caller provides InMemoryCheckpointStore)
-    fn build_memory_indexes(&self, enable_archive: bool) -> Result<CreatedIndexes, IndexError> {
+    fn build_memory_indexes(
+        &self,
+        enable_archive: bool,
+        query_id: &str,
+    ) -> Result<CreatedIndexes, IndexError> {
         let mut element_index = InMemoryElementIndex::new();
         if enable_archive {
             element_index.enable_archive();
         }
         let element_index = Arc::new(element_index);
+        InMemoryElementIndex::spawn_memory_stats_logger(
+            &element_index,
+            format!("for query '{query_id}'"),
+        );
         let result_index = InMemoryResultIndex::new();
         let future_queue = InMemoryFutureQueue::new();
 
