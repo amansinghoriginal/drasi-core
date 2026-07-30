@@ -238,7 +238,37 @@ impl Default for ElementPropertyMap {
     }
 }
 
+impl ElementValue {
+    /// Rough heap-size estimate of this value in bytes, for memory
+    /// accounting. Shared `Arc<str>` payloads are counted at each reference,
+    /// so aggregates over many values are an upper-bound approximation.
+    pub fn estimated_byte_size(&self) -> usize {
+        match self {
+            ElementValue::Null
+            | ElementValue::Bool(_)
+            | ElementValue::Float(_)
+            | ElementValue::Integer(_)
+            | ElementValue::LocalDateTime(_)
+            | ElementValue::ZonedDateTime(_) => 16,
+            ElementValue::String(s) => 24 + s.len(),
+            ElementValue::List(items) => {
+                24 + items.iter().map(|v| v.estimated_byte_size()).sum::<usize>()
+            }
+            ElementValue::Object(map) => map.estimated_byte_size(),
+        }
+    }
+}
+
 impl ElementPropertyMap {
+    /// Rough heap-size estimate of this map in bytes, for memory accounting.
+    pub fn estimated_byte_size(&self) -> usize {
+        48 + self
+            .values
+            .iter()
+            .map(|(k, v)| 56 + k.len() + v.estimated_byte_size())
+            .sum::<usize>()
+    }
+
     pub fn new() -> Self {
         ElementPropertyMap {
             values: BTreeMap::new(),
