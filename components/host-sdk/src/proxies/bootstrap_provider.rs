@@ -100,7 +100,7 @@ impl BootstrapProvider for BootstrapProviderProxy {
         );
 
         // Reclaim the FfiBootstrapSender so its drop_fn runs, which drops the
-        // std::sync::mpsc::Sender, causing the forwarding thread to exit and
+        // std::sync::mpsc::SyncSender, causing the forwarding thread to exit and
         // the tokio mpsc Sender (event_tx) to be dropped. Without this, the
         // query's bootstrap_rx.recv() would never return None and the query
         // would stay in Starting state forever.
@@ -159,13 +159,24 @@ impl Drop for BootstrapProviderProxy {
     }
 }
 
+/// Capacity of the std bridge between the plugin's `send_fn` and the host
+/// forwarding thread. Bounded so that a slow or stalled query propagates
+/// backpressure into the plugin (`send_fn` blocks when full) instead of the
+/// bridge buffering an entire snapshot in host memory; mirrors the
+/// `sync_channel(256)` used by `ChangeReceiverProxy` / `BootstrapReceiverProxy`.
+const BOOTSTRAP_BRIDGE_CAPACITY: usize = 256;
+
 /// Build an `FfiBootstrapSender` that forwards bootstrap events into a tokio mpsc sender.
 ///
-/// Uses a std::sync::mpsc channel + forwarding thread to avoid blocking the plugin's
-/// tokio runtime (the same pattern proven in the PoC's cross-plugin bootstrap).
+/// Uses a bounded std::sync::mpsc channel + forwarding thread so the plugin's
+/// tokio runtime never has to touch the host runtime directly, while the
+/// bounded capacity keeps end-to-end backpressure intact: when the query-side
+/// bootstrap channel is full, the forwarding thread blocks, the bridge fills,
+/// and the plugin's `send_fn` blocks until the consumer drains.
 fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSender {
-    // Create a std::sync channel for the plugin to send on (sync-safe)
-    let (std_tx, std_rx) = std::sync::mpsc::channel::<BootstrapEvent>();
+    // Bounded sync channel for the plugin to send on (sync-safe, blocking).
+    let (std_tx, std_rx) =
+        std::sync::mpsc::sync_channel::<BootstrapEvent>(BOOTSTRAP_BRIDGE_CAPACITY);
 
     // Spawn a thread that forwards from std channel → tokio channel
     std::thread::spawn(move || {
@@ -184,7 +195,7 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
 
     extern "C" fn send_fn(state: *mut c_void, event: *mut FfiBootstrapEvent) -> i32 {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let tx = unsafe { &*(state as *const std::sync::mpsc::Sender<BootstrapEvent>) };
+            let tx = unsafe { &*(state as *const std::sync::mpsc::SyncSender<BootstrapEvent>) };
             if event.is_null() {
                 return -1;
             }
@@ -200,6 +211,8 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
                 // Undecodable payload: skip this event, keep the stream alive.
                 return 0;
             };
+            // Blocks when the bridge is full — this is the backpressure path:
+            // the plugin's sending thread waits until the host consumer drains.
             match tx.send(bootstrap_event) {
                 Ok(()) => 0,
                 Err(_) => -1,
@@ -211,7 +224,7 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
     extern "C" fn drop_fn(state: *mut c_void) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             drop(Box::from_raw(
-                state as *mut std::sync::mpsc::Sender<BootstrapEvent>,
+                state as *mut std::sync::mpsc::SyncSender<BootstrapEvent>,
             ))
         }));
     }
