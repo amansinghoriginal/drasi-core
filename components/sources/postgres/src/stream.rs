@@ -47,6 +47,10 @@ pub struct ReplicationStream {
     pending_transaction: Option<Vec<(SourceChange, u64)>>,
     relations: HashMap<u32, RelationMapping>,
     table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Tables already warned about missing primary key values. The warning
+    /// otherwise fires per CDC row (measured 100k+ occurrences in a single
+    /// replay), flooding the log and the host's plugin log bridge.
+    pk_warned_tables: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 struct RelationMapping {
@@ -80,6 +84,7 @@ impl ReplicationStream {
             pending_transaction: None,
             relations: HashMap::new(),
             table_primary_keys: Arc::new(RwLock::new(HashMap::new())),
+            pk_warned_tables: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -651,8 +656,17 @@ impl ReplicationStream {
             }
         }
 
-        // No primary key found or all key values are NULL
-        warn!("No primary key value found for table '{table_name}'. Consider adding 'table_keys' configuration.");
+        // No primary key found or all key values are NULL. Warn once per
+        // table: this path fires per CDC row, so an unguarded warning floods
+        // the log (and the host's plugin log bridge) at event rate.
+        let first_for_table = self
+            .pk_warned_tables
+            .lock()
+            .map(|mut warned| warned.insert(table_name.to_string()))
+            .unwrap_or(false);
+        if first_for_table {
+            warn!("No primary key value found for table '{table_name}'. Consider adding 'table_keys' configuration. (warned once per table)");
+        }
         // Still include table name prefix for consistency
         Ok(format!("{}:{}", table_name, uuid::Uuid::new_v4()))
     }
