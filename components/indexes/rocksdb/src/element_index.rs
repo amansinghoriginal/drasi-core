@@ -27,7 +27,9 @@ use drasi_core::{
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::{bytes::BytesMut, Message};
-use rocksdb::{OptimisticTransactionDB, Options, SliceTransform, Transaction};
+use rocksdb::{Options, SliceTransform, Transaction};
+
+use crate::IndexDb;
 use tokio::task;
 
 use crate::storage_models::{
@@ -52,7 +54,7 @@ pub struct RocksDbElementIndex {
 }
 
 pub struct Context {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
     join_spec_by_label: RwLock<JoinSpecByLabel>,
     options: RocksIndexOptions,
     tuning: RocksDbTuning,
@@ -77,7 +79,7 @@ impl RocksDbElementIndex {
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
     pub fn new(
-        db: Arc<OptimisticTransactionDB>,
+        db: Arc<IndexDb>,
         options: RocksIndexOptions,
         tuning: RocksDbTuning,
         session_state: Arc<RocksDbSessionState>,
@@ -421,7 +423,7 @@ pub(crate) fn element_cf_descriptors(
 fn get_element_internal(
     context: Arc<Context>,
     element_key: &ReferenceHash,
-    txn: &Transaction<'_, OptimisticTransactionDB>,
+    txn: &Transaction<'_, IndexDb>,
 ) -> Result<Option<StoredElement>, IndexError> {
     let element_cf = context
         .db
@@ -444,7 +446,7 @@ fn get_element_internal(
 
 fn delete_element_internal(
     context: Arc<Context>,
-    txn: &Transaction<'_, OptimisticTransactionDB>,
+    txn: &Transaction<'_, IndexDb>,
     element_key: &ReferenceHash,
 ) -> Result<(), IndexError> {
     let element_cf = context
@@ -528,7 +530,7 @@ fn delete_element_internal(
 
 fn set_element_internal(
     context: Arc<Context>,
-    txn: &Transaction<OptimisticTransactionDB>,
+    txn: &Transaction<IndexDb>,
     element: StoredElement,
     slot_affinity: &Vec<usize>,
 ) -> Result<(), IndexError> {
@@ -661,7 +663,7 @@ fn set_element_internal(
 
 fn update_source_joins(
     context: Arc<Context>,
-    txn: &Transaction<OptimisticTransactionDB>,
+    txn: &Transaction<IndexDb>,
     new_element: &StoredElement,
 ) -> Result<(), IndexError> {
     match new_element {
@@ -843,7 +845,7 @@ fn update_source_joins(
 
 fn delete_source_joins(
     context: Arc<Context>,
-    txn: &Transaction<OptimisticTransactionDB>,
+    txn: &Transaction<IndexDb>,
     old_element: &StoredElement,
 ) -> Result<(), IndexError> {
     match old_element {
@@ -888,7 +890,7 @@ fn delete_source_joins(
 
 fn delete_source_join(
     context: Arc<Context>,
-    txn: &Transaction<OptimisticTransactionDB>,
+    txn: &Transaction<IndexDb>,
     old_element: &StoredElementReference,
     query_join: &QueryJoin,
     join_key: &QueryJoinKey,

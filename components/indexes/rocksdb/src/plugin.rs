@@ -32,7 +32,9 @@
 
 use async_trait::async_trait;
 use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
-use rocksdb::{OptimisticTransactionDB, Options};
+use rocksdb::{Options};
+
+use crate::IndexDb;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -42,13 +44,12 @@ use crate::future_queue::{self, RocksDbFutureQueue};
 use crate::live_results::{self, RocksDbLiveResultsWriter};
 use crate::outbox::{self, RocksDbOutboxWriter};
 use crate::result_index::{self, RocksDbResultIndex};
-use crate::idle_flush::IdleFlushRegistry;
 use crate::tuning::RocksDbTuning;
 use crate::{RocksDbSessionControl, RocksDbSessionState};
 
 /// Open a unified RocksDB database with all column families needed for a query.
 ///
-/// This creates a single `OptimisticTransactionDB` instance containing all
+/// This creates a single `IndexDb` instance containing all
 /// column families for element index, result index, and future queue.
 ///
 /// # Arguments
@@ -65,7 +66,7 @@ pub fn open_unified_db(
     query_id: &str,
     options: &RocksIndexOptions,
     tuning: &RocksDbTuning,
-) -> Result<Arc<OptimisticTransactionDB>, IndexError> {
+) -> Result<Arc<IndexDb>, IndexError> {
     // `query_id` is used directly as a directory name under `path`. Reject values
     // that could escape the base directory or otherwise misbehave as a path
     // segment (separators, parent/current-dir references, NUL, or empty).
@@ -111,7 +112,11 @@ pub fn open_unified_db(
         tuning.base_cf_options(false),
     ));
 
-    let db = OptimisticTransactionDB::open_cf_descriptors(&db_opts, db_path, cfs)
+    // Default TransactionDBOptions: 1s lock/txn timeouts and an unbounded
+    // lock count. Sessions are single-writer per DB, so lock contention (and
+    // therefore lock-manager memory) is effectively nil.
+    let txn_db_opts = rocksdb::TransactionDBOptions::default();
+    let db = IndexDb::open_cf_descriptors(&db_opts, &txn_db_opts, db_path, cfs)
         .map_err(IndexError::other)?;
     Ok(Arc::new(db))
 }
@@ -119,7 +124,7 @@ pub fn open_unified_db(
 /// RocksDB index backend provider.
 ///
 /// This provider creates RocksDB-backed indexes for persistent storage.
-/// All indexes for a query share a single `OptimisticTransactionDB` instance,
+/// All indexes for a query share a single `IndexDb` instance,
 /// reducing resource overhead and enabling cross-index atomic transactions.
 ///
 /// # Configuration
@@ -140,8 +145,6 @@ pub struct RocksDbIndexProvider {
     enable_archive: bool,
     direct_io: bool,
     tuning: RocksDbTuning,
-    idle_flush: Arc<IdleFlushRegistry>,
-    sweeper_started: std::sync::atomic::AtomicBool,
 }
 
 impl RocksDbIndexProvider {
@@ -178,9 +181,7 @@ impl RocksDbIndexProvider {
             path: path.into(),
             enable_archive,
             direct_io,
-            idle_flush: Arc::new(IdleFlushRegistry::new(tuning.write_buffer_manager.clone())),
             tuning,
-            sweeper_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -218,17 +219,6 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
 
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
-
-        // Register with the idle-flush sweeper (see idle_flush.rs for why),
-        // starting the background task on first use so a tokio runtime is
-        // guaranteed to exist (create_indexes is async).
-        self.idle_flush.register(query_id, &db, &session_state);
-        if !self
-            .sweeper_started
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            tokio::spawn(self.idle_flush.clone().run());
-        }
 
         let element_index = Arc::new(RocksDbElementIndex::new(
             db.clone(),

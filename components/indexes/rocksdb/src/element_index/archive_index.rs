@@ -20,7 +20,9 @@ use drasi_core::{
     models::{Element, ElementReference, ElementTimestamp, TimestampBound, TimestampRange},
 };
 use prost::{bytes::Bytes, Message};
-use rocksdb::{OptimisticTransactionDB, Options, SliceTransform, Transaction};
+use rocksdb::{Options, SliceTransform, Transaction};
+
+use crate::IndexDb;
 use tokio::task;
 
 use crate::{
@@ -232,7 +234,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
 
 pub fn insert_archive(
     context: Arc<Context>,
-    txn: &Transaction<OptimisticTransactionDB>,
+    txn: &Transaction<IndexDb>,
     element_key: ReferenceHash,
     element: &Bytes,
     effective_from: u64,

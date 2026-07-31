@@ -32,7 +32,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
-use rocksdb::{ColumnFamilyDescriptor, OptimisticTransactionDB, Options};
+use rocksdb::{ColumnFamilyDescriptor, Options};
+
+use crate::IndexDb;
 use tokio::task;
 
 use crate::RocksDbSessionState;
@@ -59,12 +61,12 @@ pub(crate) fn stream_state_cf_descriptor(
 /// Shares a `RocksDbSessionState` with the result/element/future indexes so that
 /// `stage_checkpoint` writes land in the same transaction as index updates.
 pub struct RocksDbCheckpointStore {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
 }
 
 impl RocksDbCheckpointStore {
-    pub fn new(db: Arc<OptimisticTransactionDB>, session_state: Arc<RocksDbSessionState>) -> Self {
+    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
         Self { db, session_state }
     }
 }

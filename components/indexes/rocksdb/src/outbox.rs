@@ -24,7 +24,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, OutboxWriter};
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, OptimisticTransactionDB, Options};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options};
+
+use crate::IndexDb;
 use tokio::task;
 
 /// Column family name for outbox data.
@@ -71,11 +73,11 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// Stores serialized query results in a column family with ordered keys
 /// for efficient range reads and trimming.
 pub struct RocksDbOutboxWriter {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
 }
 
 impl RocksDbOutboxWriter {
-    pub fn new(db: Arc<OptimisticTransactionDB>) -> Self {
+    pub fn new(db: Arc<IndexDb>) -> Self {
         Self { db }
     }
 }

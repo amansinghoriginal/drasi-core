@@ -14,7 +14,7 @@
 
 //! Shared memory tuning for the RocksDB index backend.
 //!
-//! Every query opens its own `OptimisticTransactionDB` with 15 column families.
+//! Every query opens its own `IndexDb` with 15 column families.
 //! Without shared budgets, each CF gets a private block cache and a 64 MiB
 //! write buffer, which costs ~80 MiB of RSS per query before any data
 //! (see drasi-core#634). `RocksDbTuning` holds the process- or provider-wide
@@ -39,8 +39,9 @@ pub const DEFAULT_HOT_WRITE_BUFFER_SIZE: usize = 16 * 1024 * 1024;
 /// Default memtable size for all other CFs.
 pub const DEFAULT_COLD_WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
-/// Flushed-memtable history retained per CF for optimistic conflict checks.
-/// Kept deliberately small: retained memtables stay charged to the shared
+/// Flushed-memtable history retained per CF. Must be explicit and nonzero:
+/// TransactionDB sanitizes a zero into its own (unbounded-in-practice)
+/// retention default, and retained memtables stay charged to the shared
 /// WriteBufferManager, so this bounds process-wide history at
 /// ~#CFs x this value instead of ~#CFs x write_buffer_size.
 pub const WRITE_BUFFER_HISTORY_BYTES: usize = 1024 * 1024;
@@ -127,15 +128,14 @@ impl RocksDbTuning {
     fn apply_common(&self, opts: &mut Options, hot: bool) {
         let wbs = self.write_buffer_size(hot);
         opts.set_write_buffer_size(wbs);
-        // Retain only a small window of flushed-memtable history for optimistic
-        // conflict checks. Sessions are single-writer and short, so validation
-        // never needs to look past the current generation; retaining a full
-        // buffer generation per CF (the previous bound of `wbs`) authorizes
-        // roughly #CFs x wbs of history process-wide, and because retained
+        // Retain a small explicit flushed-memtable history window. Pessimistic
+        // transactions take row locks up front, so they barely need history —
+        // but the bound must be EXPLICIT and NONZERO: TransactionDB sanitizes
+        // a zero into its own retention default, silently resurrecting
+        // unbounded history (measured: WBM charge 2.9 GiB and climbing against
+        // a 512 MiB budget with maintain=0 on this exact workload). Retained
         // memtables stay charged to the WriteBufferManager after every flush,
-        // sustained ingest converts the whole budget into never-freed history
-        // (measured: 2.8 GiB charged against a 512 MiB budget on a 28-query
-        // workload, with live memtables under 200 MiB).
+        // so this constant bounds process-wide history at ~#CFs x 1 MiB.
         opts.set_max_write_buffer_size_to_maintain(WRITE_BUFFER_HISTORY_BYTES as i64);
         // Memtables allocate arena memory in blocks of this size, and the first
         // block is paid at memtable construction. The sanitized default is
