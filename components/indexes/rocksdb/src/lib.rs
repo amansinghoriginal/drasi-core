@@ -31,6 +31,17 @@
 //!     .build()?;
 //! ```
 
+/// The transactional RocksDB database type used for all query indexes.
+///
+/// Pessimistic `TransactionDB` rather than `OptimisticTransactionDB`: index
+/// sessions are single-writer and short, so commit-time OCC validation buys
+/// nothing, while every OCC DB pays a fixed lock-bucket allocation at open
+/// (`MakeSharedOccLockBuckets` — jemalloc-profiled at 1.57 GB live across a
+/// 28-query workload) plus retained write-buffer history for validation.
+/// Pessimistic row locks are sized by locks actually held (near zero for a
+/// single writer) and need no history at all.
+pub type IndexDb = rocksdb::TransactionDB;
+
 mod budget_monitor;
 pub mod checkpoint;
 #[cfg(feature = "plugin-descriptor")]
@@ -39,7 +50,6 @@ pub mod element_index;
 pub mod future_queue;
 pub mod live_results;
 pub mod outbox;
-mod idle_flush;
 mod plugin;
 pub mod result_index;
 mod session_state;

@@ -31,9 +31,9 @@ use prost::{
     bytes::{Bytes, BytesMut},
     Message,
 };
-use rocksdb::{
-    Direction, IteratorMode, MergeOperands, OptimisticTransactionDB, Options, SliceTransform,
-};
+use rocksdb::{Direction, IteratorMode, MergeOperands, Options, SliceTransform, };
+
+use crate::IndexDb;
 use tokio::task;
 
 use crate::storage_models::{StoredValueAccumulator, StoredValueAccumulatorContainer};
@@ -46,7 +46,7 @@ use crate::RocksDbSessionState;
 ///     - values [set_id] -> ValueAccumulator
 ///     - sorted-sets [set_id + value] -> count {8 byte prefix (set_id)}
 pub struct RocksDbResultIndex {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
     tuning: RocksDbTuning,
     session_state: Arc<RocksDbSessionState>,
 }
@@ -61,7 +61,7 @@ impl RocksDbResultIndex {
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
     pub fn new(
-        db: Arc<OptimisticTransactionDB>,
+        db: Arc<IndexDb>,
         tuning: RocksDbTuning,
         session_state: Arc<RocksDbSessionState>,
     ) -> Self {

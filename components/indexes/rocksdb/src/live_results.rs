@@ -24,10 +24,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
-use rocksdb::{
-    ColumnFamilyDescriptor, IteratorMode, OptimisticTransactionDB, Options,
-    WriteBatchWithTransaction,
-};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatchWithTransaction, };
+
+use crate::IndexDb;
 use tokio::task;
 
 /// Column family name for live results data.
@@ -72,11 +71,11 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// Stores serialized row data keyed by `(query_id, row_signature)`.
 /// Uses WriteBatch for atomic multi-row mutations.
 pub struct RocksDbLiveResultsWriter {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
 }
 
 impl RocksDbLiveResultsWriter {
-    pub fn new(db: Arc<OptimisticTransactionDB>) -> Self {
+    pub fn new(db: Arc<IndexDb>) -> Self {
         Self { db }
     }
 }
