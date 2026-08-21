@@ -19,8 +19,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 
 #[derive(Deserialize)]
@@ -479,6 +477,40 @@ fn build_command(build_tool: &str) -> Command {
     cmd
 }
 
+fn plugin_build_command(
+    build_tool: &str,
+    use_zigbuild: bool,
+    plugins: &[String],
+    target: Option<&str>,
+    release: bool,
+    jobs: usize,
+) -> Command {
+    let mut cmd = build_command(build_tool);
+    if !use_zigbuild {
+        cmd.arg("build");
+    }
+    cmd.arg("--lib");
+    for plugin in plugins {
+        cmd.args(["-p", plugin]);
+    }
+
+    let features = plugins
+        .iter()
+        .map(|name| format!("{name}/dynamic-plugin"))
+        .collect::<Vec<_>>()
+        .join(",");
+    cmd.args(["--features", &features]);
+
+    if let Some(target) = target {
+        cmd.args(["--target", target]);
+    }
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.args(["--jobs", &jobs.to_string()]);
+    cmd
+}
+
 fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
     for (i, arg) in args.iter().enumerate() {
         if arg == flag {
@@ -518,6 +550,9 @@ fn build_plugins(args: &[String]) {
         None => target_dir.join(mode),
     };
     let plugins_dir = build_dir.join("plugins");
+    if plugins_dir.exists() {
+        fs::remove_dir_all(&plugins_dir).expect("failed to clear plugins directory");
+    }
 
     let target_triple = target.clone().unwrap_or_else(host_target_triple);
 
@@ -583,112 +618,24 @@ fn build_plugins(args: &[String]) {
         jobs
     );
 
-    let failed = Arc::new(AtomicBool::new(false));
-    let target_dir = Arc::new(target_dir);
-    let target = Arc::new(target);
     // The value passed to `--target` on the build command. For zigbuild this is
     // the glibc-suffixed triple; otherwise it matches the canonical `target`.
-    let cmd_target = Arc::new(build_target.clone().or_else(|| (*target).clone()));
-    let build_tool_str = build_tool.to_string();
-    let plugins: Vec<_> = result
+    let cmd_target = build_target.clone().or_else(|| target.clone());
+    let plugins: Vec<String> = result
         .plugins
         .iter()
-        .map(|p| (p.package.name.clone(), p.package.manifest_path.clone()))
+        .map(|p| p.package.name.clone())
         .collect();
 
-    if use_cross {
-        // cross must run from workspace root using -p, and sequentially
-        // (each invocation starts a Docker container)
-        for (name, _manifest) in &plugins {
-            if failed.load(Ordering::Relaxed) {
-                break;
-            }
-            println!("  Building {name}...");
-
-            let feature_flag = format!("{name}/dynamic-plugin");
-            let mut cmd = build_command(&build_tool_str);
-            cmd.args(["build", "--lib", "-p", name, "--features", &feature_flag]);
-
-            if let Some(t) = cmd_target.as_ref() {
-                cmd.args(["--target", t]);
-            }
-            if release {
-                cmd.arg("--release");
-            }
-
-            let status = cmd.status().expect("failed to run cross build");
-            if !status.success() {
-                eprintln!("Failed to build {name}");
-                failed.store(true, Ordering::Relaxed);
-            } else {
-                println!("  Built {name}");
-            }
-        }
-    } else {
-        // cargo / cargo zigbuild: parallel builds with --manifest-path
-        let build_tool = Arc::new(build_tool_str);
-
-        for chunk in plugins.chunks(jobs) {
-            if failed.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let handles: Vec<_> = chunk
-                .iter()
-                .map(|(name, manifest)| {
-                    let name = name.clone();
-                    let manifest = manifest.clone();
-                    let failed = Arc::clone(&failed);
-                    let target_dir = Arc::clone(&target_dir);
-                    let cmd_target = Arc::clone(&cmd_target);
-                    let build_tool = Arc::clone(&build_tool);
-
-                    thread::spawn(move || {
-                        println!("  Building {name}...");
-
-                        let mut cmd = build_command(build_tool.as_str());
-                        // `cargo zigbuild` is itself the build subcommand
-                        // (equivalent to `cargo build`), so only plain `cargo`
-                        // needs an explicit `build` here.
-                        if !use_zigbuild {
-                            cmd.arg("build");
-                        }
-                        cmd.args([
-                            "--lib",
-                            "--manifest-path",
-                            manifest.to_str().expect("invalid manifest path"),
-                            "--target-dir",
-                            target_dir.to_str().expect("invalid target dir"),
-                            "--features",
-                            "dynamic-plugin",
-                        ]);
-
-                        if let Some(t) = cmd_target.as_ref() {
-                            cmd.args(["--target", t]);
-                        }
-
-                        if release {
-                            cmd.arg("--release");
-                        }
-
-                        let status = cmd.status().expect("failed to run build command");
-                        if !status.success() {
-                            eprintln!("Failed to build {name}");
-                            failed.store(true, Ordering::Relaxed);
-                        } else {
-                            println!("  Built {name}");
-                        }
-                    })
-                })
-                .collect();
-
-            for h in handles {
-                h.join().expect("build thread panicked");
-            }
-        }
-    }
-
-    if failed.load(Ordering::Relaxed) {
+    let mut cmd = plugin_build_command(
+        build_tool,
+        use_zigbuild,
+        &plugins,
+        cmd_target.as_deref(),
+        release,
+        jobs,
+    );
+    if !cmd.status().expect("failed to run plugin build").success() {
         eprintln!("=== Plugin build failed ===");
         std::process::exit(1);
     }
@@ -710,7 +657,6 @@ fn build_plugins(args: &[String]) {
                 eprintln!("Failed to copy {lib_name} to plugins/: {e}");
                 0
             });
-            let _ = fs::remove_file(&src);
         } else {
             eprintln!(
                 "ERROR: expected cdylib not found after build: {}",
@@ -738,8 +684,6 @@ fn build_plugins(args: &[String]) {
         fs::write(&metadata_path, metadata_json).unwrap_or_else(|e| {
             eprintln!("Failed to write metadata for {name}: {e}");
         });
-
-        clean_build_artifacts(&build_dir, &lib_name);
     }
 
     if !missing_binaries.is_empty() {
@@ -777,33 +721,6 @@ fn build_plugins(args: &[String]) {
     }
 
     println!("=== cdylib plugins output to {} ===", plugins_dir.display());
-}
-
-fn clean_build_artifacts(build_dir: &Path, lib_name: &str) {
-    let rlib = build_dir.join(format!("{lib_name}.rlib"));
-    if rlib.exists() {
-        let _ = fs::remove_file(&rlib);
-    }
-
-    let d_file = build_dir.join(format!("{lib_name}.d"));
-    if d_file.exists() {
-        let _ = fs::remove_file(&d_file);
-    }
-
-    let deps_dir = build_dir.join("deps");
-    if deps_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&deps_dir) {
-            for entry in entries.flatten() {
-                let fname = entry.file_name();
-                let fname = fname.to_string_lossy();
-                if fname.starts_with(lib_name)
-                    && (fname.ends_with(".rlib") || fname.ends_with(".d"))
-                {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
 }
 
 // ---------- OCI Publish ----------
@@ -1469,6 +1386,45 @@ mod tests {
         assert_eq!(zig.get_program(), "cargo");
         let args: Vec<_> = zig.get_args().collect();
         assert_eq!(args, ["zigbuild"]);
+    }
+
+    #[test]
+    fn plugin_build_command_batches_packages_and_features() {
+        let plugins = vec![
+            "drasi-source-http".to_string(),
+            "drasi-reaction-http".to_string(),
+        ];
+        let command = plugin_build_command(
+            "cargo zigbuild",
+            true,
+            &plugins,
+            Some("x86_64-unknown-linux-gnu.2.28"),
+            true,
+            8,
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            [
+                "zigbuild",
+                "--lib",
+                "-p",
+                "drasi-source-http",
+                "-p",
+                "drasi-reaction-http",
+                "--features",
+                "drasi-source-http/dynamic-plugin,drasi-reaction-http/dynamic-plugin",
+                "--target",
+                "x86_64-unknown-linux-gnu.2.28",
+                "--release",
+                "--jobs",
+                "8",
+            ]
+        );
     }
 
     #[test]
