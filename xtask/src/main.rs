@@ -55,6 +55,7 @@ struct Dependency {
 
 struct DiscoveryResult {
     plugins: Vec<PluginInfo>,
+    build_batches: Vec<Vec<String>>,
     target_directory: PathBuf,
     sdk_version: String,
     core_version: String,
@@ -173,6 +174,15 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         .map(|p| p.version.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
+    let plugin_names: BTreeSet<String> = metadata
+        .packages
+        .iter()
+        .filter(|p| p.features.contains_key("dynamic-plugin"))
+        .filter(|p| parse_plugin_type_kind(&p.name).is_some())
+        .map(|p| p.name.clone())
+        .collect();
+    let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
+
     let plugins = metadata
         .packages
         .into_iter()
@@ -189,6 +199,7 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
 
     DiscoveryResult {
         plugins,
+        build_batches,
         target_directory: metadata.target_directory,
         sdk_version,
         core_version,
@@ -229,6 +240,44 @@ fn find_dependency_path(
     }
 
     None
+}
+
+fn plugin_build_batches(packages: &[Package], plugin_names: &BTreeSet<String>) -> Vec<Vec<String>> {
+    let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for package in packages {
+        let dependencies = graph.entry(package.name.clone()).or_default();
+        dependencies.extend(
+            package
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.path.is_some())
+                .filter(|dependency| {
+                    matches!(
+                        dependency.kind.as_deref(),
+                        None | Some("normal") | Some("build")
+                    )
+                })
+                .map(|dependency| dependency.name.clone()),
+        );
+    }
+
+    let conflicts = |left: &str, right: &str| {
+        find_dependency_path(&graph, left, right).is_some()
+            || find_dependency_path(&graph, right, left).is_some()
+    };
+
+    let mut batches: Vec<Vec<String>> = Vec::new();
+    for plugin in plugin_names {
+        if let Some(batch) = batches
+            .iter_mut()
+            .find(|batch| batch.iter().all(|other| !conflicts(plugin, other)))
+        {
+            batch.push(plugin.clone());
+        } else {
+            batches.push(vec![plugin.clone()]);
+        }
+    }
+    batches
 }
 
 fn versioned_dev_dependency_cycles(packages: &[Package]) -> Vec<String> {
@@ -621,23 +670,29 @@ fn build_plugins(args: &[String]) {
     // The value passed to `--target` on the build command. For zigbuild this is
     // the glibc-suffixed triple; otherwise it matches the canonical `target`.
     let cmd_target = build_target.clone().or_else(|| target.clone());
-    let plugins: Vec<String> = result
-        .plugins
-        .iter()
-        .map(|p| p.package.name.clone())
-        .collect();
-
-    let mut cmd = plugin_build_command(
-        build_tool,
-        use_zigbuild,
-        &plugins,
-        cmd_target.as_deref(),
-        release,
-        jobs,
+    println!(
+        "=== Split into {} dependency-safe Cargo batches ===",
+        result.build_batches.len()
     );
-    if !cmd.status().expect("failed to run plugin build").success() {
-        eprintln!("=== Plugin build failed ===");
-        std::process::exit(1);
+    for (index, batch) in result.build_batches.iter().enumerate() {
+        println!(
+            "=== Building batch {}/{} ({} plugins) ===",
+            index + 1,
+            result.build_batches.len(),
+            batch.len()
+        );
+        let mut cmd = plugin_build_command(
+            build_tool,
+            use_zigbuild,
+            batch,
+            cmd_target.as_deref(),
+            release,
+            jobs,
+        );
+        if !cmd.status().expect("failed to run plugin build").success() {
+            eprintln!("=== Plugin build failed in batch {} ===", index + 1);
+            std::process::exit(1);
+        }
     }
 
     // Move plugin shared libraries to plugins/ subdirectory and generate metadata
@@ -1423,6 +1478,40 @@ mod tests {
                 "--release",
                 "--jobs",
                 "8",
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_build_batches_separate_transitive_plugin_dependencies() {
+        let packages = vec![
+            package(
+                "drasi-bootstrap-example",
+                true,
+                vec![dependency("example-common", "*", None)],
+            ),
+            package(
+                "example-common",
+                true,
+                vec![dependency("drasi-source-example", "*", Some("build"))],
+            ),
+            package("drasi-source-example", true, Vec::new()),
+            package("drasi-reaction-example", true, Vec::new()),
+        ];
+        let plugin_names = BTreeSet::from([
+            "drasi-bootstrap-example".to_string(),
+            "drasi-reaction-example".to_string(),
+            "drasi-source-example".to_string(),
+        ]);
+
+        assert_eq!(
+            plugin_build_batches(&packages, &plugin_names),
+            [
+                vec![
+                    "drasi-bootstrap-example".to_string(),
+                    "drasi-reaction-example".to_string(),
+                ],
+                vec!["drasi-source-example".to_string()],
             ]
         );
     }
